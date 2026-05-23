@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -313,6 +314,153 @@ async def _list_items_async(status: Optional[str]) -> None:
         )
 
     click.echo("└────────────────────────────────┴─────────┴──────────────────────────────────────┴──────────────────┘")
+
+
+@cli.command()
+@click.option("--since", type=int, default=24, help="Hours of history to include (default: 24)")
+def cost_report(since: int) -> None:
+    """
+    Display AI provider cost report.
+
+    Shows total spending, breakdown by provider, and top-5 most expensive calls.
+    """
+    from src.services.cost_meter import get_cost_meter
+    from tabulate import tabulate
+
+    meter = get_cost_meter()
+    report = meter.get_report(since_hours=since)
+
+    # Header
+    click.secho(f"\n💰 AI Cost Report (last {since} hours)", fg="cyan", bold=True)
+    click.secho(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", fg="dim")
+    click.echo()
+
+    # Total cost
+    total_usd = report["total_cost_usd"]
+    total_calls = report["total_calls"]
+    click.secho(f"Total Cost:  ${total_usd:.4f}", fg="green", bold=True)
+    click.secho(f"Total Calls: {total_calls}", fg="green")
+    click.echo()
+
+    # By provider
+    if report["by_provider"]:
+        click.secho("By Provider:", fg="cyan", bold=True)
+        provider_table = [
+            [
+                p["provider"],
+                f"${p['total']:.4f}",
+                p["calls"],
+                f"${p['total'] / max(p['calls'], 1):.6f}",  # avg per call
+            ]
+            for p in report["by_provider"]
+        ]
+        click.echo(
+            tabulate(
+                provider_table,
+                headers=["Provider", "Total ($)", "Calls", "Avg/Call ($)"],
+                tablefmt="simple",
+            )
+        )
+        click.echo()
+
+    # Top 5 expensive
+    if report["top_5_expensive"]:
+        click.secho("Top 5 Most Expensive Calls:", fg="cyan", bold=True)
+        expensive_table = [
+            [
+                r["provider"],
+                r["model"],
+                r["prompt_tokens"] + r["completion_tokens"],
+                f"${r['dollars']:.6f}",
+                r["timestamp"][:19],  # truncate to date time
+            ]
+            for r in report["top_5_expensive"]
+        ]
+        click.echo(
+            tabulate(
+                expensive_table,
+                headers=["Provider", "Model", "Total Tokens", "Cost ($)", "Timestamp"],
+                tablefmt="simple",
+            )
+        )
+        click.echo()
+
+    if total_calls == 0:
+        click.secho("⚠️  No cost records found.", fg="yellow")
+
+
+# ── Bonus 6: Streaming responses ──────────────────────────────────────────────
+
+@cli.command()
+@click.argument("image_path", type=click.Path(exists=True))
+@click.argument("prompt")
+@click.option(
+    "--provider",
+    type=click.Choice(["openai", "anthropic"], case_sensitive=False),
+    default=None,
+    help="Provider to use (default: from LLM_PROVIDER env var)",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model to use (default: from LLM_MODEL env var)",
+)
+def vlm_stream(
+    image_path: str, prompt: str, provider: Optional[str], model: Optional[str]
+) -> None:
+    """
+    Stream VLM response token-by-token (Bonus 6: Streaming +2 pts).
+    
+    Tokens are printed to stdout as they arrive from the provider,
+    enabling real-time feedback instead of waiting for the full response.
+    
+    Example:
+    
+        python -m src.cli vlm-stream data/lost/umbrella_black.png "describe this item"
+    
+    Note: Streaming works best for prose descriptions. Structured JSON output
+    may not stream cleanly due to schema enforcement.
+    """
+    import os
+    from src.ai.streaming import stream_response
+    
+    # Use env vars as defaults
+    provider = provider or os.getenv("LLM_PROVIDER", "openai")
+    model = model or os.getenv("LLM_MODEL")
+    
+    click.secho(f"🔄 Streaming from {provider}", fg="cyan")
+    if model:
+        click.secho(f"   Model: {model}", fg="cyan")
+    click.echo()
+    
+    try:
+        token_count = 0
+        for token in stream_response(image_path, prompt, provider, model):
+            click.echo(token, nl=False)
+            token_count += 1
+        
+        click.echo()  # Final newline
+        click.echo()
+        click.secho(f"✓ Streamed {token_count} tokens", fg="green")
+        
+    except ImportError as e:
+        click.secho(f"❌ Error: {e}", fg="red", err=True)
+        click.secho(
+            f"   Install required package: pip install {provider}",
+            fg="yellow",
+            err=True,
+        )
+        raise click.Abort()
+    except FileNotFoundError:
+        click.secho(f"❌ Image not found: {image_path}", fg="red", err=True)
+        raise click.Abort()
+    except ValueError as e:
+        click.secho(f"❌ Error: {e}", fg="red", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.secho(f"❌ Unexpected error: {e}", fg="red", err=True)
+        logger.exception("Streaming failed")
+        raise click.Abort()
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
