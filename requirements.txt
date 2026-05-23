@@ -23,3 +23,17 @@ pytest-cov>=5.0
 
 # Web UI (Bonus 5)
 streamlit>=1.35.0
+
+# Bonus 2: Cost telemetry
+# (SQLite built-in, JSON built-in)
+
+# Bonus 3: GitHub Actions CI
+# (Uses ruff, mypy, pytest from testing deps)
+
+# Bonus 4: OpenTelemetry tracing
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-jaeger-thrift>=1.20.0
+
+# Bonus 7: Token budgets
+# (Uses asyncio built-in)
