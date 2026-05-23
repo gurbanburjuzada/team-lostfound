@@ -67,6 +67,16 @@ artifacts/
 *.sqlite
 *.sqlite3
 
+# Working documents (not for final submission)
+BONUS_ACTION_PLAN.md
+BONUS_IMPLEMENTATION_STATUS.md
+
+# IDE/Editor specific (Kiro/Claude)
+.claude/
+
+# Requirements/templates (reference only, not part of deliverable)
+requirements/
+
 # IDE
 .idea/
 
