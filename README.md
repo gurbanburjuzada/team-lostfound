@@ -209,22 +209,60 @@ respect provider rate limits.
 
 ## Docker
 
-### Build
+### Using Docker Compose (recommended for development)
+
+The easiest way to run the full stack (app + PostgreSQL) locally:
 
 ```bash
-docker build -t lostfound:latest .
+# Start both the API and PostgreSQL database
+docker-compose up -d
+
+# View logs
+docker-compose logs -f app
+
+# Stop everything
+docker-compose down
 ```
 
-### Run
+Once running:
+- **API**: http://localhost:8000
+- **Health check**: http://localhost:8000/health
+- **PostgreSQL**: localhost:5432 (user: `postgres`, password: `postgres`, db: `lostfound`)
+
+**Configuration**: Environment variables are in `docker-compose.yml`. To override, create a `.env` file:
+```bash
+ANTHROPIC_API_KEY=your_key_here
+OPENAI_API_KEY=your_key_here
+```
+
+### Manual Docker build and run
+
+If you prefer to use Docker directly without compose:
 
 ```bash
+# Build the image
+docker build -t lostfound:latest .
+
+# Run the image (requires external PostgreSQL)
 docker run --rm \
   --env-file .env \
   -p 8000:8000 \
   lostfound:latest
 ```
 
-### Full demo in Docker
+**Note**: PostgreSQL must be reachable from inside the container. If running
+PostgreSQL separately, update `DATABASE_URL` in `.env` to point to your host IP
+(e.g., `postgresql+asyncpg://postgres:dev@host.docker.internal:5432/lostfound`).
+
+### Run the demo in Docker
+
+With docker-compose already running:
+
+```bash
+docker-compose exec app python scripts/demo.py
+```
+
+Or standalone (requires all env vars + external PostgreSQL):
 
 ```bash
 docker run --rm \
@@ -234,8 +272,59 @@ docker run --rm \
   python scripts/demo.py
 ```
 
-> PostgreSQL must be reachable from inside the container. Update `DATABASE_URL`
-> in `.env` to point to your host IP (not `localhost`) when running in Docker.
+With docker-compose already running:
+
+```bash
+docker-compose exec app python scripts/demo.py
+```
+
+Or standalone (requires all env vars + external PostgreSQL):
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network host \
+  lostfound:latest \
+  python scripts/demo.py
+```
+
+---
+
+## Troubleshooting
+
+### Database connection errors
+
+**Error**: `psycopg.OperationalError: could not connect to server`
+
+**Solution**:
+1. Verify PostgreSQL is running: `docker ps | grep postgres`
+2. Check `DATABASE_URL` in `.env` — it should match your PostgreSQL host/port
+3. For docker-compose, use `postgres` as the hostname (not `localhost`)
+4. For Docker on Mac/Windows, use `host.docker.internal` as the hostname
+
+### Missing API keys
+
+**Error**: `ProviderError: API key not set`
+
+**Solution**:
+1. Create `.env` from `.env.example`: `cp .env.example .env`
+2. Fill in `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and/or `GOOGLE_API_KEY`
+3. Restart the app: `docker-compose restart app`
+
+### "Item is still being processed"
+
+**Error**: `409 Conflict — Item is still being processed`
+
+**Cause**: The embedding for the item hasn't been computed yet (still in `register_batch`).
+
+**Solution**: Wait a few seconds and retry the query.
+
+### "No matches found"
+
+This is normal if:
+- No items of the opposite status exist (e.g., querying a LOST item when no FOUND items are registered)
+- All similarity scores are below the threshold
+- Try registering more sample items: `python data/_make_samples.py && python scripts/demo.py`
 
 ---
 

@@ -1,0 +1,122 @@
+# docker-compose.yml — Local development environment
+#
+# Includes:
+#   - FastAPI app (src/api.py)
+#   - Streamlit Web UI (ui/app.py)  ← Bonus 5: Web UI (+2 pts)
+#   - PostgreSQL database
+#
+# Usage:
+#   docker-compose up -d
+#   docker-compose logs -f app
+#   docker-compose down
+#
+# Ports:
+#   8000 — FastAPI REST API  (http://localhost:8000/docs)
+#   8501 — Streamlit Web UI  (http://localhost:8501)
+
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    container_name: lostfound-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: lostfound
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lostfound-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # AI Provider Configuration
+      LLM_PROVIDER: anthropic
+      LLM_MODEL: claude-sonnet-4-6
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      
+      EMBEDDING_PROVIDER: openai
+      EMBEDDING_MODEL: text-embedding-3-small
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      
+      # Database
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lostfound
+      
+      # Storage
+      IMAGE_STORAGE_DIR: ./data/uploads
+      MAX_IMAGE_SIZE_MB: 5
+      
+      # API
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      
+      # Logging
+      LOG_LEVEL: INFO
+      
+      # Concurrency & Caching
+      SEMAPHORE_LIMIT: 5
+      CACHE_TTL_SECONDS: 3600
+      
+      # Retries
+      RETRY_MAX_ATTEMPTS: 3
+      RETRY_WAIT_SECONDS: 1.0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Streamlit Web UI (Bonus 5: Web UI +2 pts)
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lostfound-ui
+    command: ["streamlit", "run", "ui/app.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LLM_PROVIDER: anthropic
+      LLM_MODEL: claude-sonnet-4-6
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      EMBEDDING_PROVIDER: openai
+      EMBEDDING_MODEL: text-embedding-3-small
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lostfound
+      IMAGE_STORAGE_DIR: ./data/uploads
+      MAX_IMAGE_SIZE_MB: 5
+      LOG_LEVEL: INFO
+      SEMAPHORE_LIMIT: 5
+      CACHE_TTL_SECONDS: 3600
+      RETRY_MAX_ATTEMPTS: 3
+      RETRY_WAIT_SECONDS: 1.0
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+
+volumes:
+  postgres_data:
+    driver: local
