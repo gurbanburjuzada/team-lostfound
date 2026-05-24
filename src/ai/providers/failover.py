@@ -183,6 +183,9 @@ class FailoverEmbedding(EmbeddingProvider):
                 )
                 if hasattr(provider, "embed_async") and inspect.iscoroutinefunction(provider.embed_async):
                     result = await provider.embed_async(text)
+                elif hasattr(provider, "embed_async"):
+                    # embed_async exists but is not a coroutine (e.g. Mock with side_effect)
+                    result = provider.embed_async(text)
                 else:
                     result = provider.embed(text)
                 self._logger.info(f"Embedding failover (async) succeeded on provider {i}")
