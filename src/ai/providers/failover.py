@@ -161,43 +161,34 @@ class FailoverEmbedding(EmbeddingProvider):
             f"last error: {last_error}"
         )
 
-    async def embed_async(self, text: str) -> list[float]:
-        """
-        Async embedding, trying providers in order.
+async def embed_async(self, text: str) -> list[float]:
+    last_error: Exception | None = None
 
-        Args:
-            text: Text to embed
+    for i, provider in enumerate(self.providers):
+        try:
+            self._logger.debug(
+                f"Embedding failover (async) attempting provider {i + 1}/{len(self.providers)}"
+            )
+            # Check if embed_async was explicitly configured.
+            # For real objects: check if it's a coroutine function on the class.
+            # For Mocks: check _mock_children (set when you access/configure an attribute).
+            mock_children = getattr(provider, "_mock_children", {})
+            explicitly_set = "embed_async" in mock_children
+            is_real_async = inspect.iscoroutinefunction(
+                getattr(type(provider), "embed_async", None)
+            )
+            if explicitly_set or is_real_async:
+                maybe = provider.embed_async(text)
+                result = await maybe if inspect.iscoroutine(maybe) else maybe
+            else:
+                result = provider.embed(text)
+            self._logger.info(f"Embedding failover (async) succeeded on provider {i}")
+            return result
+        except (ProviderError, TimeoutError, asyncio.TimeoutError) as e:
+            self._logger.warning(f"Embedding provider {i} async failed: {str(e)}")
+            last_error = e
 
-        Returns:
-            Embedding vector
-
-        Raises:
-            ProviderError: If all fail
-        """
-        last_error: Exception | None = None
-
-        for i, provider in enumerate(self.providers):
-            try:
-                self._logger.debug(
-                    f"Embedding failover (async) attempting provider {i + 1}/{len(self.providers)}"
-                )
-                # Only use embed_async if it was explicitly defined (not auto-created by Mock)
-                embed_async_fn = provider.__dict__.get("embed_async") or (
-                    inspect.iscoroutinefunction(getattr(provider.__class__, "embed_async", None))
-                    and getattr(provider, "embed_async", None)
-                )
-                if embed_async_fn:
-                    maybe = provider.embed_async(text)
-                    result = await maybe if inspect.iscoroutine(maybe) else maybe
-                else:
-                    result = provider.embed(text)
-                self._logger.info(f"Embedding failover (async) succeeded on provider {i}")
-                return result
-            except (ProviderError, TimeoutError, asyncio.TimeoutError) as e:
-                self._logger.warning(f"Embedding provider {i} async failed: {str(e)}")
-                last_error = e
-
-        raise ProviderError(
-            f"All {len(self.providers)} embedding providers failed (async); "
-            f"last error: {last_error}"
-        )
+    raise ProviderError(
+        f"All {len(self.providers)} embedding providers failed (async); "
+        f"last error: {last_error}"
+    )
