@@ -67,6 +67,12 @@ artifacts/
 *.sqlite
 *.sqlite3
 
+# IDE/Editor specific (Kiro/Claude)
+.claude/
+
+# Requirements/templates (reference only, not part of deliverable)
+requirements/
+
 # IDE
 .idea/
 

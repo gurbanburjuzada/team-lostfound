@@ -23,10 +23,10 @@ class Settings(BaseSettings):
     )
 
     # ── AI provider (passed through to the ai/ package) ──────────────────────
-    llm_provider: str = Field(default="anthropic", description="anthropic | openai | gemini")
-    llm_model: str = Field(default="claude-sonnet-4-6")
-    embedding_provider: str = Field(default="openai")
-    embedding_model: str = Field(default="text-embedding-3-small")
+    llm_provider: str = Field(default="gemini", description="gemini")
+    llm_model: str = Field(default="gemini-2.0-flash")
+    embedding_provider: str = Field(default="gemini")
+    embedding_model: str = Field(default="text-embedding-004")
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str = Field(
@@ -78,10 +78,10 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def validate_llm_provider(cls, v: str) -> str:
-        allowed = {"anthropic", "openai", "gemini"}
+        allowed = {"gemini"}
         lower = v.lower()
         if lower not in allowed:
-            raise ValueError(f"llm_provider must be one of {allowed}, got {v!r}")
+            raise ValueError(f"llm_provider must be 'gemini', got {v!r}")
         return lower
 
     @field_validator("image_storage_dir")

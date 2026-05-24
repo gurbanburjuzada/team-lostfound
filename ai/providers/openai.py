@@ -1,6 +1,21 @@
-"""OpenAI provider adapters (GPT-4o family for VLM, text-embedding-3-* for embeddings)."""
+"""DEPRECATED: OpenAI provider is no longer supported.
+
+This module is deprecated and will be removed in a future version.
+Please use ai.providers.google (GeminiVLM / GeminiEmbedding) instead.
+
+OpenAI provider adapters (GPT-4o family for VLM, text-embedding-3-* for embeddings).
+"""
 
 from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "The OpenAI provider (ai.providers.openai) is deprecated and no longer supported. "
+    "Please use Google Gemini (ai.providers.google) instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import base64
 import json

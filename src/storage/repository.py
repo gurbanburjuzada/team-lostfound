@@ -155,11 +155,27 @@ class Repository:
     # -- filesystem (second storage backend) ----------------------------------
 
     def _store_image(self, source: str, item_id: uuid.UUID) -> Path:
-        """Copy the source image into the managed image directory."""
+        """
+        Copy the source image into the managed image directory with a safe UUID-based name.
+        
+        Security: Uses UUID for filename to prevent path traversal attacks.
+        User-provided filename is NOT used, only the extension is preserved.
+        """
         src = Path(source)
+        
+        # Generate safe filename - NEVER trust user input for paths
+        ext = src.suffix.lower()
+        safe_filename = f"{uuid.uuid4().hex}{ext}"
+        
         dest_dir = settings.image_storage_dir / str(item_id)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / src.name
+        dest = dest_dir / safe_filename
+        
+        # Defense in depth: verify destination doesn't escape storage dir
+        if not str(dest.resolve()).startswith(str(settings.image_storage_dir.resolve())):
+            logger.error("Path traversal attempt detected: %s", source)
+            raise ValueError("Invalid path: traversal detected")
+        
         shutil.copy2(src, dest)
         logger.debug("image stored src=%s dest=%s", src, dest)
         return dest

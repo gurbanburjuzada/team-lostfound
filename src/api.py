@@ -115,19 +115,32 @@ async def validate_image_upload(file: UploadFile) -> tuple[str, bytes]:
 
 async def save_uploaded_file(filename: str, content: bytes) -> str:
     """
-    Save uploaded file to a temporary location.
+    Save uploaded file to a temporary location with a safe UUID-based name.
     Returns the path to the saved file.
+    
+    Security: Uses UUID to prevent path traversal attacks. User-provided
+    filename is NOT used in the path, only the extension is preserved.
     """
     import tempfile
+    import uuid
 
+    # Generate safe filename - NEVER trust user input for paths
+    ext = Path(filename).suffix.lower()
+    safe_filename = f"{uuid.uuid4().hex}{ext}"
+    
     temp_dir = Path(tempfile.gettempdir()) / "lostfound_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = temp_dir / filename
+    temp_path = temp_dir / safe_filename
+    
+    # Defense in depth: verify path doesn't escape temp_dir
+    if not str(temp_path.resolve()).startswith(str(temp_dir.resolve())):
+        logger.error("Path traversal attempt detected: %s", filename)
+        raise ValueError("Invalid filename: path traversal detected")
 
     with open(temp_path, "wb") as f:
         f.write(content)
 
-    logger.debug("Uploaded file saved: %s", temp_path)
+    logger.debug("Uploaded file saved: %s (original: %s)", temp_path, filename)
     return str(temp_path)
 
 
