@@ -181,7 +181,11 @@ class FailoverEmbedding(EmbeddingProvider):
                     f"Embedding failover (async) attempting provider {i + 1}/{len(self.providers)}"
                 )
                 if hasattr(provider, "embed_async"):
-                    result = await provider.embed_async(text)
+                    maybe = provider.embed_async(text)
+                    if asyncio.iscoroutine(maybe):
+                        result = await maybe
+                    else:
+                        result = maybe
                 else:
                     result = provider.embed(text)
                 self._logger.info(f"Embedding failover (async) succeeded on provider {i}")
