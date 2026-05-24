@@ -181,11 +181,14 @@ class FailoverEmbedding(EmbeddingProvider):
                 self._logger.debug(
                     f"Embedding failover (async) attempting provider {i + 1}/{len(self.providers)}"
                 )
-                if hasattr(provider, "embed_async") and inspect.iscoroutinefunction(provider.embed_async):
-                    result = await provider.embed_async(text)
-                elif hasattr(provider, "embed_async"):
-                    # embed_async exists but is not a coroutine (e.g. Mock with side_effect)
-                    result = provider.embed_async(text)
+                # Only use embed_async if it was explicitly defined (not auto-created by Mock)
+                embed_async_fn = provider.__dict__.get("embed_async") or (
+                    inspect.iscoroutinefunction(getattr(provider.__class__, "embed_async", None))
+                    and getattr(provider, "embed_async", None)
+                )
+                if embed_async_fn:
+                    maybe = provider.embed_async(text)
+                    result = await maybe if inspect.iscoroutine(maybe) else maybe
                 else:
                     result = provider.embed(text)
                 self._logger.info(f"Embedding failover (async) succeeded on provider {i}")
