@@ -12,6 +12,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -34,30 +35,31 @@ from src.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
 
+# ── Global repo (initialized on startup) ─────────────────────────────────────
+
+_repo: Optional[Repository] = None
+
+
+# ── Lifespan (replaces deprecated on_event) ───────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize resources on startup, clean up on shutdown."""
+    global _repo
+    _repo = await Repository.create()
+    logger.info("API startup: database initialized")
+    yield
+    logger.info("API shutdown: cleaning up resources")
+
+
 # ── FastAPI app initialization ────────────────────────────────────────────────
 
 app = FastAPI(
     title="Smart Lost & Found API",
     description="Match lost and found items using AI vision and embeddings",
     version="1.0.0",
+    lifespan=lifespan,
 )
-
-# Global repo (initialized on startup)
-_repo: Optional[Repository] = None
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database connection pool on app startup."""
-    global _repo
-    _repo = await Repository.create()
-    logger.info("API startup: database initialized")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on app shutdown."""
-    logger.info("API shutdown: cleaning up resources")
 
 
 # ── Dependency: get repository ────────────────────────────────────────────────
@@ -117,14 +119,11 @@ async def save_uploaded_file(filename: str, content: bytes) -> str:
     Returns the path to the saved file.
     """
     import tempfile
-    import os
 
-    # Create temp file with a reasonable name
     temp_dir = Path(tempfile.gettempdir()) / "lostfound_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_path = temp_dir / filename
 
-    # Write to temp file
     with open(temp_path, "wb") as f:
         f.write(content)
 
@@ -138,7 +137,6 @@ async def save_uploaded_file(filename: str, content: bytes) -> str:
 async def health_check(repo: Repository = Depends(get_repo)) -> HealthResponse:
     """Health check endpoint."""
     try:
-        # Try a simple query to verify DB is accessible
         await repo.list_items()
         db_status = "connected"
     except Exception as e:
@@ -168,11 +166,9 @@ async def _register_item(
       2. Call register_batch() to process (describe + embed + persist)
       3. Return RegisterResponse with the item ID
     """
-    # Validate image
     filename, content = await validate_image_upload(image)
     temp_path = await save_uploaded_file(filename, content)
 
-    # Validate description
     description = description.strip()
     if not description or len(description) < 3:
         raise HTTPException(
@@ -185,7 +181,6 @@ async def _register_item(
             detail="Description must not exceed 1000 characters.",
         )
 
-    # Register via batch pipeline (concurrent describe + embed + save)
     try:
         records = await register_batch(
             items=[(temp_path, description, status)],
@@ -199,7 +194,6 @@ async def _register_item(
             detail=f"Failed to process image: {str(e)}",
         )
     finally:
-        # Clean up temp file
         try:
             Path(temp_path).unlink()
         except Exception as e:
@@ -283,7 +277,6 @@ async def get_matches(
       - 404: Item not found
       - 409: Item has no embedding yet (still processing)
     """
-    # Parse UUID
     import uuid
     try:
         item_uuid = uuid.UUID(item_id)
@@ -293,7 +286,6 @@ async def get_matches(
             detail=f"Invalid UUID: {item_id}",
         )
 
-    # Query matches
     try:
         result = await matcher.find_matches(item_uuid, k, repo)
     except ValueError as e:
@@ -336,7 +328,6 @@ async def list_items(
 
     **Response**: List of ItemSummary
     """
-    # Parse status
     item_status = None
     if status:
         try:
@@ -347,7 +338,6 @@ async def list_items(
                 detail=f"Invalid status: {status}. Must be 'lost' or 'found'.",
             )
 
-    # Query items
     items = await repo.list_items(item_status)
     logger.info("list_items: status=%s count=%d", status or "all", len(items))
     return items

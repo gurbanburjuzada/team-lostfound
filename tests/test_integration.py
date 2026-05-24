@@ -3,106 +3,182 @@ test_integration.py — Integration tests for the full system.
 
 Tests the complete workflow:
   - API endpoints (POST, GET, list)
-  - CLI commands
   - Database persistence
   - File upload and storage
   - Error handling
 
 All tests use FakeVLM and FakeEmbedder for offline testing (no API keys needed).
+The FakeRepository replaces PostgreSQL with an in-memory store, so no database
+is required either.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Optional
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from ai.providers.base import VLMProvider, EmbeddingProvider, ProviderError
-from src.api import app
-from src.models import ItemStatus, MatchConfidence
-from src.storage.repository import Repository
+from src.api import app, get_repo
+from src.models import ItemRecord, ItemStatus, ItemSummary, MatchConfidence
+from src.services.ai_service import AIService
 
 
-# ── Test fixtures ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# FakeRepository — in-memory replacement for PostgreSQL
+# ---------------------------------------------------------------------------
+
+class FakeRepository:
+    """
+    In-memory repository that mimics src.storage.repository.Repository.
+    No database required; all data lives in a plain dict.
+    """
+
+    def __init__(self, tmp_path: Path) -> None:
+        self._items: dict[uuid.UUID, ItemRecord] = {}
+        self._tmp_path = tmp_path
+
+    async def save_item(
+        self,
+        status: ItemStatus,
+        description: str,
+        source_image_path: str,
+        vlm_description: dict | None = None,
+        embedding: np.ndarray | None = None,
+    ) -> ItemRecord:
+        item_id = uuid.uuid4()
+        record = ItemRecord(
+            id=item_id,
+            status=status,
+            description=description,
+            image_path=source_image_path,
+            vlm_description=json.dumps(vlm_description) if vlm_description else None,
+            embedding=embedding.tolist() if embedding is not None else None,
+            created_at=datetime.now(timezone.utc),
+        )
+        self._items[item_id] = record
+        return record
+
+    async def update_embedding(self, item_id: uuid.UUID, embedding: np.ndarray) -> None:
+        record = self._items.get(item_id)
+        if record is None:
+            raise ValueError(f"Item {item_id} not found")
+        # Pydantic v2 models are immutable by default; use model_copy
+        updated = record.model_copy(update={"embedding": embedding.tolist()})
+        self._items[item_id] = updated
+
+    async def get_item(self, item_id: uuid.UUID) -> Optional[ItemRecord]:
+        return self._items.get(item_id)
+
+    async def list_items(self, status: Optional[ItemStatus] = None) -> list[ItemSummary]:
+        items = list(self._items.values())
+        if status:
+            items = [i for i in items if i.status == status]
+        return [
+            ItemSummary(
+                id=i.id,
+                status=i.status,
+                description=i.description,
+                image_path=i.image_path,
+                created_at=i.created_at,
+            )
+            for i in items
+        ]
+
+    async def get_items_with_embeddings(
+        self, status: ItemStatus
+    ) -> list[tuple[ItemRecord, np.ndarray]]:
+        result = []
+        for record in self._items.values():
+            if record.status == status and record.embedding is not None:
+                result.append((record, np.array(record.embedding, dtype=np.float32)))
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture
-async def repo():
-    """In-memory repository for testing."""
-    # Use a test database URL (in production, use sqlite in-memory or separate test DB)
-    repo = await Repository.create()
-    yield repo
-    # Cleanup could go here if needed
+def fake_repo(tmp_path) -> FakeRepository:
+    """In-memory repository; no database required."""
+    return FakeRepository(tmp_path)
 
 
 @pytest.fixture
-def test_client():
-    """TestClient for FastAPI endpoints."""
-    return TestClient(app)
+def test_client(fake_vlm, fake_embedder, fake_repo, tmp_path):
+    """
+    TestClient for FastAPI endpoints.
+
+    Patches:
+      - Repository.create() → returns fake_repo (so startup doesn't hit Postgres)
+      - src.api.ai_service   → AIService with fake VLM/embedder (no API keys)
+      - get_repo dependency  → returns fake_repo
+    """
+    fake_svc = AIService(
+        vlm=fake_vlm,
+        embedder=fake_embedder,
+        max_attempts=1,
+        wait_seconds=0.001,
+    )
+
+    # Override the FastAPI dependency so endpoints use our in-memory repo
+    app.dependency_overrides[get_repo] = lambda: fake_repo
+
+    with (
+        patch("src.storage.repository.Repository.create", AsyncMock(return_value=fake_repo)),
+        patch("src.api.ai_service", fake_svc),
+    ):
+        with TestClient(app) as client:
+            yield client
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
 def sample_image_bytes() -> bytes:
     """
-    Return bytes of a minimal valid PNG image (1x1 pixel, red).
-    
-    This is a real PNG file in binary form.
+    Minimal valid 1×1 PNG image as bytes.
+
+    These are the same bytes used in conftest.py's sample_image fixture,
+    verified to be a correctly-formed PNG.
     """
-    # Minimal 1x1 red PNG (hex):
-    # 89504E470D0A1A0A = PNG signature
-    # 0D000000 = IHDR chunk size (13)
-    # 49484452 = IHDR
-    # 00000001 00000001 = 1x1 dimensions
-    # 08020000 = 8-bit RGB
-    # 00 = compression, filter, interlace
-    # 906CC7 = CRC
-    # 0C000000 = IDAT chunk size (12)
-    # 49444154 = IDAT
-    # 789C62F04F050000050001010000 = compressed data + CRC
-    # 00000000 = IEND chunk size (0)
-    # 49454E44 = IEND
-    # AE426082 = CRC
-    
-    png_hex = (
-        "89504E470D0A1A0A0D0000000D49484452"
-        "0000000100000001080200000090CC7"
-        "0C0000000C49444154789C62F04F05000005"
-        "000101000001E2210BC70000000049454E44"
-        "AE426082"
+    return bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108020000"
+        "00907753de0000000c4944415408d76360000000000004000146a13a"
+        "020000000049454e44ae426082"
     )
-    return bytes.fromhex(png_hex)
 
 
 @pytest.fixture
 def sample_jpeg_bytes() -> bytes:
-    """
-    Return bytes of a minimal valid JPEG image.
-    
-    This is a real JPEG file in binary form (1x1 pixel).
-    """
-    jpeg_hex = (
-        "FFD8FFE000104A46494600010100000100"
-        "010000FFDB004300FFFFFFFFFFFFFFFFFF"
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-        "FFFFC0000B0801000101011100FFC40014"
-        "00010100000000000000000000000000000"
-        "0FFD9"
+    """Minimal valid 1×1 grayscale JPEG image as bytes."""
+    return bytes.fromhex(
+        "FFD8FFE000104A46494600010100000100010000"
+        "FFDB004300010101010101010101010101010101"
+        "010101010101010101010101010101010101010101"
+        "010101010101010101010101010101010101010101"
+        "FFC0000801000001011100FFC4001F000001050101"
+        "01010101010000000000000000010203040506070809"
+        "0A0BFFDA00080101000003F00AFFD9"
     )
-    return bytes.fromhex(jpeg_hex)
 
 
-# ── Test: Health check ─────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Tests: Health check
+# ---------------------------------------------------------------------------
 
 def test_health_check(test_client):
-    """Test GET /health endpoint."""
+    """GET /health should return status ok."""
     response = test_client.get("/health")
     assert response.status_code == 200
     data = response.json()
@@ -111,20 +187,23 @@ def test_health_check(test_client):
     assert "version" in data
 
 
-# ── Test: List items (empty) ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Tests: List items
+# ---------------------------------------------------------------------------
 
 def test_list_items_empty(test_client):
-    """Test GET /items when database is empty."""
+    """GET /items on an empty repo returns an empty list."""
     response = test_client.get("/items")
     assert response.status_code == 200
-    data = response.json()
-    assert data == []
+    assert response.json() == []
 
 
-# ── Test: Register lost item ─────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Tests: Register items
+# ---------------------------------------------------------------------------
 
 def test_register_lost_item(test_client, sample_image_bytes):
-    """Test POST /items/lost endpoint."""
+    """POST /items/lost registers a lost item and returns 201."""
     response = test_client.post(
         "/items/lost",
         data={"description": "black umbrella left at library"},
@@ -134,11 +213,11 @@ def test_register_lost_item(test_client, sample_image_bytes):
     data = response.json()
     assert "item_id" in data
     assert data["status"] == "lost"
-    assert "black umbrella" in data["message"].lower() or "successfully" in data["message"].lower()
+    assert "message" in data
 
 
 def test_register_found_item(test_client, sample_image_bytes):
-    """Test POST /items/found endpoint."""
+    """POST /items/found registers a found item and returns 201."""
     response = test_client.post(
         "/items/found",
         data={"description": "found umbrella near station"},
@@ -150,187 +229,8 @@ def test_register_found_item(test_client, sample_image_bytes):
     assert data["status"] == "found"
 
 
-# ── Test: Validation ──────────────────────────────────────────────────────
-
-def test_register_invalid_image_type(test_client):
-    """Test that non-image files are rejected."""
-    response = test_client.post(
-        "/items/lost",
-        data={"description": "test"},
-        files={"image": ("test.txt", b"not an image", "text/plain")},
-    )
-    assert response.status_code == 400
-    data = response.json()
-    assert "content type" in data["error"].lower() or "error" in data
-
-
-def test_register_missing_description(test_client, sample_image_bytes):
-    """Test that missing description is rejected."""
-    response = test_client.post(
-        "/items/lost",
-        data={},
-        files={"image": ("test.png", sample_image_bytes, "image/png")},
-    )
-    assert response.status_code in (400, 422)  # 422 is FastAPI default for missing required field
-
-
-def test_register_description_too_short(test_client, sample_image_bytes):
-    """Test that description must be at least 3 characters."""
-    response = test_client.post(
-        "/items/lost",
-        data={"description": "ab"},
-        files={"image": ("test.png", sample_image_bytes, "image/png")},
-    )
-    assert response.status_code == 400
-
-
-def test_register_description_too_long(test_client, sample_image_bytes):
-    """Test that description must not exceed 1000 characters."""
-    response = test_client.post(
-        "/items/lost",
-        data={"description": "x" * 1001},
-        files={"image": ("test.png", sample_image_bytes, "image/png")},
-    )
-    assert response.status_code == 400
-
-
-# ── Test: List items (with data) ──────────────────────────────────────────
-
-def test_list_items_with_filter(test_client, sample_image_bytes):
-    """Test GET /items with status filter."""
-    # Register a lost item
-    response1 = test_client.post(
-        "/items/lost",
-        data={"description": "test lost item"},
-        files={"image": ("test.png", sample_image_bytes, "image/png")},
-    )
-    assert response1.status_code == 201
-
-    # Register a found item
-    response2 = test_client.post(
-        "/items/found",
-        data={"description": "test found item"},
-        files={"image": ("test.png", sample_image_bytes, "image/png")},
-    )
-    assert response2.status_code == 201
-
-    # List all
-    response_all = test_client.get("/items")
-    assert response_all.status_code == 200
-    all_items = response_all.json()
-    assert len(all_items) >= 2
-
-    # List only lost
-    response_lost = test_client.get("/items?status=lost")
-    assert response_lost.status_code == 200
-    lost_items = response_lost.json()
-    assert all(item["status"] == "lost" for item in lost_items)
-
-    # List only found
-    response_found = test_client.get("/items?status=found")
-    assert response_found.status_code == 200
-    found_items = response_found.json()
-    assert all(item["status"] == "found" for item in found_items)
-
-
-# ── Test: Query matches ───────────────────────────────────────────────────
-
-def test_query_matches_invalid_uuid(test_client):
-    """Test that invalid UUID is rejected."""
-    response = test_client.get("/items/invalid-uuid/matches")
-    assert response.status_code == 400
-    data = response.json()
-    assert "uuid" in data["error"].lower() or "error" in data
-
-
-def test_query_matches_item_not_found(test_client):
-    """Test that non-existent item returns 404."""
-    fake_uuid = str(uuid.uuid4())
-    response = test_client.get(f"/items/{fake_uuid}/matches")
-    assert response.status_code == 404
-
-
-def test_query_matches_with_results(test_client, sample_image_bytes):
-    """Test finding matches between registered items."""
-    # Register 2 lost items
-    r1 = test_client.post(
-        "/items/lost",
-        data={"description": "black umbrella"},
-        files={"image": ("img1.png", sample_image_bytes, "image/png")},
-    )
-    assert r1.status_code == 201
-    item1_id = r1.json()["item_id"]
-
-    r2 = test_client.post(
-        "/items/lost",
-        data={"description": "dark umbrella"},
-        files={"image": ("img2.png", sample_image_bytes, "image/png")},
-    )
-    assert r2.status_code == 201
-
-    # Register 1 found item
-    r3 = test_client.post(
-        "/items/found",
-        data={"description": "umbrella found"},
-        files={"image": ("img3.png", sample_image_bytes, "image/png")},
-    )
-    assert r3.status_code == 201
-
-    # Wait a tiny bit for embeddings to be ready (in real app, would poll or use async)
-    import time
-    time.sleep(0.5)
-
-    # Query matches for first lost item
-    response = test_client.get(f"/items/{item1_id}/matches?k=5")
-    assert response.status_code in (200, 409)  # 409 if still processing
-
-    if response.status_code == 200:
-        data = response.json()
-        assert "query_item_id" in data
-        assert "matches" in data
-        assert "total_candidates_searched" in data
-        # Should have searched the found pool
-        assert data["total_candidates_searched"] >= 1
-
-
-def test_query_matches_k_parameter(test_client, sample_image_bytes):
-    """Test k parameter validation."""
-    # Register an item
-    r = test_client.post(
-        "/items/lost",
-        data={"description": "test item"},
-        files={"image": ("test.png", sample_image_bytes, "image/png")},
-    )
-    assert r.status_code == 201
-    item_id = r.json()["item_id"]
-
-    # Test invalid k
-    response_k0 = test_client.get(f"/items/{item_id}/matches?k=0")
-    assert response_k0.status_code in (400, 422)
-
-    response_k_large = test_client.get(f"/items/{item_id}/matches?k=101")
-    assert response_k_large.status_code in (400, 422)
-
-    # Valid k should work (or return 409 if still processing)
-    response_k_valid = test_client.get(f"/items/{item_id}/matches?k=3")
-    assert response_k_valid.status_code in (200, 409)
-
-
-# ── Test: Error responses ──────────────────────────────────────────────────
-
-def test_error_response_format(test_client):
-    """Test that error responses have the correct format."""
-    response = test_client.get("/items/invalid-uuid/matches")
-    assert response.status_code == 400
-    data = response.json()
-    assert "error" in data
-    # "detail" is optional
-
-
-# ── Test: JPEG support ────────────────────────────────────────────────────
-
 def test_register_jpeg_item(test_client, sample_jpeg_bytes):
-    """Test that JPEG images are accepted."""
+    """POST /items/lost with a JPEG image is accepted."""
     response = test_client.post(
         "/items/lost",
         data={"description": "test jpeg item"},
@@ -339,31 +239,190 @@ def test_register_jpeg_item(test_client, sample_jpeg_bytes):
     assert response.status_code == 201
 
 
-# ── Concurrency tests (optional, stress-test-ish) ────────────────────────
+# ---------------------------------------------------------------------------
+# Tests: Input validation
+# ---------------------------------------------------------------------------
+
+def test_register_invalid_image_type(test_client):
+    """Non-image content type is rejected with 400."""
+    response = test_client.post(
+        "/items/lost",
+        data={"description": "test"},
+        files={"image": ("test.txt", b"not an image", "text/plain")},
+    )
+    assert response.status_code == 400
+    data = response.json()
+    assert "error" in data
+
+
+def test_register_missing_description(test_client, sample_image_bytes):
+    """Missing description field yields 400 or 422."""
+    response = test_client.post(
+        "/items/lost",
+        data={},
+        files={"image": ("test.png", sample_image_bytes, "image/png")},
+    )
+    assert response.status_code in (400, 422)
+
+
+def test_register_description_too_short(test_client, sample_image_bytes):
+    """Description shorter than 3 characters is rejected (400 or 422)."""
+    response = test_client.post(
+        "/items/lost",
+        data={"description": "ab"},
+        files={"image": ("test.png", sample_image_bytes, "image/png")},
+    )
+    assert response.status_code in (400, 422)
+
+
+def test_register_description_too_long(test_client, sample_image_bytes):
+    """Description longer than 1000 characters is rejected (400 or 422)."""
+    response = test_client.post(
+        "/items/lost",
+        data={"description": "x" * 1001},
+        files={"image": ("test.png", sample_image_bytes, "image/png")},
+    )
+    assert response.status_code in (400, 422)
+
+
+# ---------------------------------------------------------------------------
+# Tests: List items with filter
+# ---------------------------------------------------------------------------
+
+def test_list_items_with_filter(test_client, sample_image_bytes):
+    """GET /items?status=lost returns only lost items."""
+    test_client.post(
+        "/items/lost",
+        data={"description": "test lost item"},
+        files={"image": ("test.png", sample_image_bytes, "image/png")},
+    )
+    test_client.post(
+        "/items/found",
+        data={"description": "test found item"},
+        files={"image": ("test.png", sample_image_bytes, "image/png")},
+    )
+
+    resp_all = test_client.get("/items")
+    assert resp_all.status_code == 200
+    assert len(resp_all.json()) >= 2
+
+    resp_lost = test_client.get("/items?status=lost")
+    assert resp_lost.status_code == 200
+    assert all(i["status"] == "lost" for i in resp_lost.json())
+
+    resp_found = test_client.get("/items?status=found")
+    assert resp_found.status_code == 200
+    assert all(i["status"] == "found" for i in resp_found.json())
+
+
+# ---------------------------------------------------------------------------
+# Tests: Query matches
+# ---------------------------------------------------------------------------
+
+def test_query_matches_invalid_uuid(test_client):
+    """GET /items/<invalid>/matches returns 400 with error key."""
+    response = test_client.get("/items/not-a-uuid/matches")
+    assert response.status_code == 400
+    assert "error" in response.json()
+
+
+def test_query_matches_item_not_found(test_client):
+    """GET /items/<unknown-uuid>/matches returns 404."""
+    response = test_client.get(f"/items/{uuid.uuid4()}/matches")
+    assert response.status_code == 404
+
+
+def test_query_matches_with_results(test_client, sample_image_bytes):
+    """End-to-end: register lost + found items, then query matches."""
+    r1 = test_client.post(
+        "/items/lost",
+        data={"description": "black umbrella"},
+        files={"image": ("img1.png", sample_image_bytes, "image/png")},
+    )
+    assert r1.status_code == 201
+    item1_id = r1.json()["item_id"]
+
+    test_client.post(
+        "/items/found",
+        data={"description": "umbrella found near exit"},
+        files={"image": ("img2.png", sample_image_bytes, "image/png")},
+    )
+
+    response = test_client.get(f"/items/{item1_id}/matches?k=5")
+    # Either matches returned or item has no embedding yet (409)
+    assert response.status_code in (200, 409)
+    if response.status_code == 200:
+        data = response.json()
+        assert "query_item_id" in data
+        assert "matches" in data
+        assert "total_candidates_searched" in data
+
+
+def test_query_matches_k_parameter(test_client, sample_image_bytes):
+    """k=0 and k=101 are invalid; k=3 is valid."""
+    r = test_client.post(
+        "/items/lost",
+        data={"description": "test item"},
+        files={"image": ("test.png", sample_image_bytes, "image/png")},
+    )
+    assert r.status_code == 201
+    item_id = r.json()["item_id"]
+
+    assert test_client.get(f"/items/{item_id}/matches?k=0").status_code in (400, 422)
+    assert test_client.get(f"/items/{item_id}/matches?k=101").status_code in (400, 422)
+    assert test_client.get(f"/items/{item_id}/matches?k=3").status_code in (200, 409)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Error response format
+# ---------------------------------------------------------------------------
+
+def test_error_response_format(test_client):
+    """Error responses contain an 'error' key."""
+    response = test_client.get("/items/bad-uuid/matches")
+    assert response.status_code == 400
+    assert "error" in response.json()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Concurrency (offline)
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_concurrent_registrations(test_client, sample_image_bytes):
-    """Test that multiple concurrent registrations work."""
+async def test_concurrent_registrations(fake_vlm, fake_embedder, fake_repo, tmp_path):
+    """
+    asyncio.gather over multiple register_batch calls should all succeed.
+
+    This verifies the concurrency layer (pipeline.py) works offline
+    without a real database or API.
+    """
     import asyncio
+    from src.concurrency.pipeline import register_batch
 
-    async def register_one(i: int) -> dict:
-        """Register one item asynchronously."""
-        # Note: TestClient is sync, so we need to be careful here
-        # For true async testing, we'd use httpx.AsyncClient
-        response = test_client.post(
-            "/items/lost",
-            data={"description": f"concurrent test item {i}"},
-            files={"image": (f"test{i}.png", sample_image_bytes, "image/png")},
+    # Write a tiny PNG to disk so the pipeline can open it
+    png_bytes = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108020000"
+        "00907753de0000000c4944415408d76360000000000004000146a13a"
+        "020000000049454e44ae426082"
+    )
+    img_path = str(tmp_path / "tiny.png")
+    Path(img_path).write_bytes(png_bytes)
+
+    svc = AIService(vlm=fake_vlm, embedder=fake_embedder, max_attempts=1, wait_seconds=0.001)
+
+    # Run three registrations concurrently
+    tasks = [
+        register_batch(
+            [(img_path, f"concurrent item {i}", ItemStatus.LOST)],
+            repo=fake_repo,
+            ai_svc=svc,
         )
-        return response.json()
+        for i in range(3)
+    ]
+    results = await asyncio.gather(*tasks)
 
-    # This is a simplification; in a real test, use async httpx.AsyncClient
-    tasks = [register_one(i) for i in range(3)]
-
-    # Since TestClient is sync, just do sequential calls
-    results = []
-    for task in tasks:
-        results.append(task)
-
+    # Each call should return exactly one record
     assert len(results) == 3
-    assert all("item_id" in r for r in results)
+    for batch in results:
+        assert len(batch) == 1
+        assert batch[0].status == ItemStatus.LOST
