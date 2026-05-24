@@ -27,6 +27,7 @@ Example:
 
 from __future__ import annotations
 
+import inspect
 import asyncio
 import logging
 from typing import Optional
@@ -180,12 +181,8 @@ class FailoverEmbedding(EmbeddingProvider):
                 self._logger.debug(
                     f"Embedding failover (async) attempting provider {i + 1}/{len(self.providers)}"
                 )
-                if hasattr(provider, "embed_async"):
-                    maybe = provider.embed_async(text)
-                    if asyncio.iscoroutine(maybe):
-                        result = await maybe
-                    else:
-                        result = maybe
+                if hasattr(provider, "embed_async") and inspect.iscoroutinefunction(provider.embed_async):
+                    result = await provider.embed_async(text)
                 else:
                     result = provider.embed(text)
                 self._logger.info(f"Embedding failover (async) succeeded on provider {i}")
