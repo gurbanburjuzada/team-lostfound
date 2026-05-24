@@ -96,7 +96,16 @@ class CostMeter:
         conn.commit()
         conn.close()
 
-    def estimate_cost(self, provider: str, model: str, prompt_t: int, completion_t: int) -> float:
+    def estimate_cost(
+        self,
+        provider: str,
+        model: str,
+        prompt_t: int = 0,
+        completion_t: int = 0,
+        *,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+    ) -> float:
         """
         Estimate cost for a provider call.
 
@@ -109,10 +118,11 @@ class CostMeter:
         Returns:
             Estimated cost in USD (0.0 if pricing unknown)
         """
+        p = prompt_tokens if prompt_tokens is not None else prompt_t
+        c = completion_tokens if completion_tokens is not None else completion_t
         pricing = PRICING_USD_PER_1K_TOKENS.get((provider, model), (0.0, 0.0))
         prompt_price, completion_price = pricing
-        cost = (prompt_t / 1000.0) * prompt_price + (completion_t / 1000.0) * completion_price
-        return cost
+        return (p / 1000.0) * prompt_price + (c / 1000.0) * completion_price
 
     async def record(
         self, provider: str, model: str, prompt_tokens: int, completion_tokens: int

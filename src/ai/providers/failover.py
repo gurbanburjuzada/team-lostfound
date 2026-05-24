@@ -118,6 +118,11 @@ class FailoverEmbedding(EmbeddingProvider):
         self.providers = providers
         self._logger = logging.getLogger(__name__)
 
+    @property
+    def dimension(self) -> int:
+        """Return dimension from the first provider."""
+        return self.providers[0].dimension
+
     def embed(self, text: str) -> list[float]:
         """
         Embed text, trying providers in order until one succeeds.
