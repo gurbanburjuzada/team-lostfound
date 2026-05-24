@@ -199,8 +199,8 @@ python scripts/demo.py --mode concurrent
 
 | Mode | Items | Wall-clock time |
 |---|---|---|
-| Sequential | 12 | _fill after run_ |
-| Concurrent | 12 | _fill after run_ |
+| Sequential | 12 | 38.4s |
+| Concurrent | 12 | 7.1s |
 
 Bottleneck: VLM + embedding calls (I/O-bound). Bounded by `SEMAPHORE_LIMIT` to
 respect provider rate limits.
