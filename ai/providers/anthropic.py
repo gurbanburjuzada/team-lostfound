@@ -1,4 +1,9 @@
-"""Anthropic Claude provider adapters.
+"""DEPRECATED: Anthropic provider is no longer supported.
+
+This module is deprecated and will be removed in a future version.
+Please use ai.providers.google (GeminiVLM) instead.
+
+Anthropic Claude provider adapters.
 
 Uses the Anthropic Messages API for vision via base64 image upload.
 Anthropic does not offer a first-party embedding endpoint, so the
@@ -7,6 +12,15 @@ EMBEDDING_PROVIDER=openai (or another provider) when LLM_PROVIDER=anthropic.
 """
 
 from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "The Anthropic provider (ai.providers.anthropic) is deprecated and no longer supported. "
+    "Please use Google Gemini (ai.providers.google) instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import base64
 import json

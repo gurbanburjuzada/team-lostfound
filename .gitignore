@@ -67,13 +67,6 @@ artifacts/
 *.sqlite
 *.sqlite3
 
-# Working documents (not for final submission)
-BONUS_ACTION_PLAN.md
-BONUS_IMPLEMENTATION_STATUS.md
-BONUS_COMPLETION_SUMMARY.md
-PITFALL_AUDIT_REPORT.md
-GIT_WORKFLOW_COMPLIANCE.md
-
 # IDE/Editor specific (Kiro/Claude)
 .claude/
 

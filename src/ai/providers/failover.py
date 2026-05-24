@@ -10,20 +10,17 @@ automatically tries the next. Failures are:
 
 Example:
     from src.ai.providers.failover import FailoverVLM, FailoverEmbedding
-    from ai.providers.openai import OpenAIVLM
-    from ai.providers.anthropic import AnthropicVLM
+    from ai.providers.google import GeminiVLM, GeminiEmbedding
 
-    # Try OpenAI, fall back to Anthropic
+    # Use Google Gemini with automatic failover
     vlm = FailoverVLM([
-        OpenAIVLM(),
-        AnthropicVLM(),
+        GeminiVLM(),
     ])
     response = vlm.describe("image.jpg", "describe this")
 
-    # For embedding: try Google, fall back to OpenAI
+    # For embedding: use Google Gemini
     embedding = FailoverEmbedding([
-        GoogleEmbedding(),
-        OpenAIEmbedding(),
+        GeminiEmbedding(),
     ])
     vector = embedding.embed("test")
 """
